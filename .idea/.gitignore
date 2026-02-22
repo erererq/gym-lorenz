@@ -1,0 +1,29 @@
+# 默认忽略的文件
+/shelf/
+/workspace.xml
+# 基于编辑器的 HTTP 客户端请求
+/httpRequests/
+# Datasource local storage ignored files
+/dataSources/
+/dataSources.local.xml
+# Python 缓存文件
+__pycache__/
+*.py[cod]
+
+# 强化学习相关
+*.zip
+*.pt
+*.pth
+lorenztensorboard2/
+logs/
+checkpoints/
+
+# 本地虚拟环境
+venv/
+env/
+.env
+
+# 打包产生的文件 (setup.py 生成的)
+build/
+dist/
+*.egg-info/
