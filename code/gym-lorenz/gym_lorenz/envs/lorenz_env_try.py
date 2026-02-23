@@ -16,17 +16,18 @@ class HRSyncEnv(gym.Env):
     Master 系统: 自由运行
     Slave 系统: 受 RL Agent 控制
     """
-    def __init__(self, add_noise=False):
+    def __init__(self, add_noise=False, eval_mode=False):
         super().__init__()
         self.add_noise = add_noise  # 开关：是否添加噪声
+        self.eval_mode = eval_mode  # 开关：是否为评估模式
         
         # 1. 定义动作空间: 连续值，代表控制电流 u
         # 假设控制电流范围在 [-1.0, 1.0] 之间
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
         
         # 2. 定义状态空间: [x_m, y_m, z_m, x_s, y_s, z_s]
-        # 或者简化为误差系统 [ex, ey, ez]，这里我们用误差，让 Agent 自己学习特征
-        self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
+        # 或者简化为误差系统 [ex, ey, ez]，这里我们用误差，让 Agent 自己学习特征，还有绝对位置三个维度
+        self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(6,), dtype=np.float32)
         self.scale_factor = 50.0  # 定义缩放因子
         # HR 模型参数 (根据论文调整)
         self.a, self.b, self.c, self.d = 1.0, 3.0, 1.0, 5.0
@@ -52,17 +53,26 @@ class HRSyncEnv(gym.Env):
         self.state_slave = np.random.uniform(-10, 20, 3)
         if self.add_noise:
             # 每次重置环境，噪声强度都变一下，范围 [0, 2]
-            self.sigma = np.random.uniform(0, 2)
+            if self.eval_mode:
+                # 如果是考试模式，锁定最高难度 2.0，保证公平对待每一个模型
+                self.sigma = 2.0
+            else:
+                # 如果是平时训练，随机抽卡 [0, 2]
+                self.sigma = np.random.uniform(0, 2)
         else:
             self.sigma = 0.0
         # 返回论文要求的观察向量 Ot (公式 12)
         error_vector = self.state_master - self.state_slave
         # 记得 Reset 也要归一化
         normalized_error = np.clip(error_vector / self.scale_factor, -1.0, 1.0)
-        return normalized_error.astype(np.float32), {}
+        # 新增：获取 Master 系统的绝对位置并归一化 (初始值最大 20，除以 20.0 压到 [-1, 1] 附近)
+        normalized_master = np.clip(self.state_master / 20.0, -1.0, 1.0)
+        # 拼接成 6 维向量：[ex, ey, ez, x_m, y_m, z_m]
+        obs_6d = np.concatenate([normalized_error, normalized_master])
+        return obs_6d.astype(np.float32), {}
 
     def step(self, action):
-        # self.current_step += 1
+        # # self.current_step += 1
         
         # 映射动作
         # --- 关键修改：手动将 [-1, 1] 映射到 [-100, 100] ---
@@ -91,7 +101,6 @@ class HRSyncEnv(gym.Env):
         self.state_slave += (dt/6.0) * (sk1 + 2*sk2 + 2*sk3 + sk4)
 
         
-        # self.current_step += 1
         # x1, x2, x3 = self.state_master
         # y1, y2, y3 = self.state_slave
         # # --- 关键修改：手动将 [-1, 1] 映射到 [-100, 100] ---
@@ -128,6 +137,11 @@ class HRSyncEnv(gym.Env):
         # --- 论文公式 (12): 计算新的观察向量 Ot ---
         error_vector = self.state_master - self.state_slave
         normalized_error = error_vector / self.scale_factor
+        # 新增：同样获取 Master 系统的绝对位置并归一化
+        normalized_master = np.clip(self.state_master / 20.0, -1.0, 1.0)
+        
+        # 拼接成 6 维向量
+        obs_6d = np.concatenate([normalized_error, normalized_master])
         # 3. 计算奖励 (Reward Design - 论文的核心)
         # 目标：误差越小奖励越高，控制量越小奖励越高
         # --- 论文公式 (14): 奖励函数 (曼哈顿距离的负值) ---
@@ -135,22 +149,22 @@ class HRSyncEnv(gym.Env):
          # --- 改动 3: 奖励函数保持使用“真实误差” ---
         # 为什么要用真实误差？因为我们需要物理意义上的收敛。
         # 如果用归一化误差，Reward 数值太小，可能需要调整权重。
-        # 这里的 0.001 * action^2 是惩罚 [-1,1] 的动作输出，是合理的
-        reward = -np.sum(np.abs(error_vector))- 0.001 * np.sum(np.square(action))
+        # 这里的 0.050 * action^2 是惩罚 [-1,1] 的动作输出，是合理的
+        reward = -np.sum(np.abs(normalized_error))- 0.100 * np.sum(np.square(action))
         
         # 4. 判断结束条件
         # 通常混沌同步训练会跑固定的步数，或者误差过大时强制停止
         terminated = False
         truncated = False
         # --- 改动 4: 增加 Early Stopping (防发散) ---
-        # 如果任何一个维度的误差超过 60 (比50大一点)，认为控制失败，强制结束
+        # 如果任何一个维度的误差超过 70 (比50大一点)，认为控制失败，强制结束
         # 这能极大地加速训练，不让 Agent 在错误的道路上浪费时间
-        if np.any(np.abs(error_vector) > 60.0):
+        if np.any(np.abs(error_vector) > 70.0):
             terminated = True
             reward = -2000.0  # 给一个大的惩罚
         # truncated = self.current_step >= self.max_steps  # 2000步后强制结束并重置
         
-        return normalized_error.astype(np.float32), float(reward), terminated, truncated, {}
+        return obs_6d.astype(np.float32), float(reward), terminated, truncated, {}
 
 if __name__ == "__main__":
     env = HRSyncEnv(add_noise=False)  # 启用噪声

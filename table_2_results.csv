@@ -1,0 +1,4 @@
+Different cases,MAE,RMSE
+Testing without noise,0.26644543,0.42187068
+Testing with noise (training without noise),0.24189793,0.38645408
+Testing with noise (training with noise),0.54308236,0.7287439

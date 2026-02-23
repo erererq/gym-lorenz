@@ -3,7 +3,10 @@ from gymnasium.envs.registration import register
 
 register(
     id='lorenz_try-v0',
-    entry_point="gym_lorenz.envs:lorenz_env_try",
+    # 写法一利用下级目录写好的import导入方式，
+    entry_point="gym_lorenz.envs:HRSyncEnv",
+    # 写法二直接写包路径
+    # entry_point="gym_lorenz.envs.lorenz_env_try:HRSyncEnv",
     # 包路径:类名
     # entry_point='gym_lorenz.envs:lorenzEnv_transient',
     max_episode_steps = 2000,
