@@ -16,10 +16,11 @@ class HRSyncEnv(gym.Env):
     Master 系统: 自由运行
     Slave 系统: 受 RL Agent 控制
     """
-    def __init__(self, add_noise=False, eval_mode=False):
+    def __init__(self, add_noise=False, eval_mode=False,add_filter=False):
         super().__init__()
         self.add_noise = add_noise  # 开关：是否添加噪声
         self.eval_mode = eval_mode  # 开关：是否为评估模式
+        self.add_filter = add_filter  # 开关：是否启用动作滤波器
         
         # 1. 定义动作空间: 连续值，代表控制电流 u
         # 假设控制电流范围在 [-1.0, 1.0] 之间
@@ -35,6 +36,9 @@ class HRSyncEnv(gym.Env):
         self.dt = 0.001  # 仿真步长
         self.sigma=0.0 # 噪声强度，默认不添加噪声
         
+        # 🌟 仅新增：动作滤波器的记忆变量和系数
+        self.action_alpha = 0.95  # 动作平滑系数 (调参重点！不能太小，否则动作有延迟会导致无法同步)
+        self.filtered_action = np.zeros(2, dtype=np.float32) # 记忆上一步的平滑动作
         self.state_master = None # [x1, x2, x3]
         self.state_slave = None  # [y1, y2, y3]
         # --- 新增：步数计数器 ---
@@ -51,6 +55,8 @@ class HRSyncEnv(gym.Env):
         self.state_master = np.random.uniform(-10, 20, 3)
         # Slave 系统初始值（给它一个较大的初始偏差）
         self.state_slave = np.random.uniform(-10, 20, 3)
+         # 🌟 新增：重置环境时，动作滤波器的记忆也要清零
+        self.filtered_action = np.zeros(2, dtype=np.float32)
         if self.add_noise:
             # 每次重置环境，噪声强度都变一下，范围 [0, 2]
             if self.eval_mode:
@@ -73,7 +79,11 @@ class HRSyncEnv(gym.Env):
 
     def step(self, action):
         # # self.current_step += 1
-        
+        # 🌟 核心防线 2：出口防线 (动作滤波)
+        # 拿到网络给出的狂躁 action，做平滑处理！
+        # ==========================================
+        if self.add_filter:
+            action = (1 - self.action_alpha) * self.filtered_action + self.action_alpha * action
         # 映射动作
         # --- 关键修改：手动将 [-1, 1] 映射到 [-100, 100] ---
         # 假设网络输出的是 raw_action
@@ -150,7 +160,7 @@ class HRSyncEnv(gym.Env):
         # 为什么要用真实误差？因为我们需要物理意义上的收敛。
         # 如果用归一化误差，Reward 数值太小，可能需要调整权重。
         # 这里的 0.050 * action^2 是惩罚 [-1,1] 的动作输出，是合理的
-        reward = -np.sum(np.abs(normalized_error))- 0.100 * np.sum(np.square(action))
+        reward = -np.sum(np.abs(normalized_error))- 0.050 * np.sum(np.square(action))
         
         # 4. 判断结束条件
         # 通常混沌同步训练会跑固定的步数，或者误差过大时强制停止
@@ -166,16 +176,16 @@ class HRSyncEnv(gym.Env):
         
         return obs_6d.astype(np.float32), float(reward), terminated, truncated, {}
 
-if __name__ == "__main__":
-    env = HRSyncEnv(add_noise=False)  # 启用噪声
-    model = PPO("MlpPolicy", env, learning_rate=3e-4,      # 降低学习率，走稳一点
-    n_steps=2048,            # 每次更新采集更多样本
-    batch_size=64,           # 减小 Batch 增加更新频率
-    gae_lambda=0.95,         # 稳定优势估计
-    verbose=1,
-    device='cpu')
-    print("正在训练论文版模型，请稍候...")
-        #  100 万步
-    model.learn(total_timesteps=1000000)
-    model.save("hr_paper_final_model") # 这会生成一个 .zip 文件
-    print("训练成功！模型已保存为 hr_paper_final_model.zip")
+# if __name__ == "__main__":
+#     env = HRSyncEnv(add_noise=False)  # 启用噪声
+#     model = PPO("MlpPolicy", env, learning_rate=3e-4,      # 降低学习率，走稳一点
+#     n_steps=2048,            # 每次更新采集更多样本
+#     batch_size=64,           # 减小 Batch 增加更新频率
+#     gae_lambda=0.95,         # 稳定优势估计
+#     verbose=1,
+#     device='cpu')
+#     print("正在训练论文版模型，请稍候...")
+#         #  100 万步
+#     model.learn(total_timesteps=1000000)
+#     model.save("hr_paper_final_model") # 这会生成一个 .zip 文件
+#     print("训练成功！模型已保存为 hr_paper_final_model.zip")

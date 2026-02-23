@@ -4,8 +4,9 @@ from matplotlib.axes import Axes
 
 # 1. 获取当前代码文件 (main_script.py) 所在的绝对路径目录
 current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir=os.path.dirname(current_dir)
 # 2. 拼凑出 gym-lorenz 的绝对路径
-gym_lorenz_path = os.path.join(current_dir, 'gym-lorenz')
+gym_lorenz_path = os.path.join(parent_dir, 'gym-lorenz')
 
 # 3. 把拼出来的路径插到环境变量里
 sys.path.append(gym_lorenz_path)
@@ -44,7 +45,9 @@ from stable_baselines3 import DDPG, A2C, SAC, PPO
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.noise import NormalActionNoise
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
-from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
+from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecFrameStack
+from env_utils import make_env
+
 
 # 注意：关于 MlpPolicy 的导入已经删掉。
 # 请在后续代码中直接使用字符串，如： model = DDPG("MlpPolicy", env)
@@ -93,7 +96,9 @@ def test_and_evaluate(model_path, add_noise, title):
 
     # 1. 初始化环境
     # 测试时，明确告诉环境：“现在是考试时间，请锁定噪声难度！”
-    env = gymnasium.make("lorenz_try-v0",add_noise=add_noise, eval_mode=True)  # 这里直接在 make 时传参，简化代码
+    env=DummyVecEnv([lambda:make_env(add_noise=add_noise,add_filter=True,eval_mode=True)])  # 这里直接在 make 时传参，简化代码
+    # 再套上 SB3 专属的 VecFrameStack (假设堆叠 4 帧)
+    env = VecFrameStack(env, n_stack=4)
     # 2. 尝试加载模型
     try:
         model = PPO.load(model_path,env, device='cpu')
@@ -104,37 +109,39 @@ def test_and_evaluate(model_path, add_noise, title):
     all_tests_data = [] # 用来给画图函数用的
     steady_errors = []  # 用来算 MAE 和 RMSE 的 (去掉前1000步)
 
+    ORIG_OBS_DIM = 6
+
     # 3. 跑 10 次独立测试
     for test_idx in range(10):
-        obs,_=env.reset()
+        obs=env.reset()
 
         # 准备一个小本子，记录当前这 1 次测试的所有过程
         test_record = {'time': [], 'err_x': [], 'err_y': [], 'err_z': [], 'ctrl_x': [], 'ctrl_y': []}
-        test_record['init_err_x'] = obs[0]*50
-        test_record['init_err_y'] = obs[1]*50
-        test_record['init_err_z'] = obs[2]*50
+        test_record['init_err_x'] = obs[0,-ORIG_OBS_DIM+0]*50
+        test_record['init_err_y'] = obs[0,-ORIG_OBS_DIM+1]*50
+        test_record['init_err_z'] = obs[0,-ORIG_OBS_DIM+2]*50
         first_action_recorded = False
 
         # 跑 5000 步
         for step in range(5000):
             action, _ = model.predict(obs, deterministic=True)
-            obs, _, _, _, _ = env.step(action)
+            obs, _, _, _= env.step(action)
             # 记录测试数据
             test_record['time'].append(step*0.001)  # 记录时间，单位秒
-            test_record['err_x'].append(obs[0]*50)  # 乘回去，记录真实误差
-            test_record['err_y'].append(obs[1]*50)  # 乘回去，记录真实误差
-            test_record['err_z'].append(obs[2]*50)  # 乘回去，记录真实误差
-            test_record['ctrl_x'].append(action[0]*100)
-            test_record['ctrl_y'].append(action[1]*100)
+            test_record['err_x'].append(obs[0,-ORIG_OBS_DIM+0]*50)  # 乘回去，记录真实误差
+            test_record['err_y'].append(obs[0,-ORIG_OBS_DIM+1]*50)  # 乘回去，记录真实误差
+            test_record['err_z'].append(obs[0,-ORIG_OBS_DIM+2]*50)  # 乘回去，记录真实误差
+            test_record['ctrl_x'].append(action[0,0]*100)
+            test_record['ctrl_y'].append(action[0,1]*100)
 
             if not first_action_recorded:
-                test_record['init_ctrl_x'] = action[0]*100
-                test_record['init_ctrl_y'] = action[1]*100
+                test_record['init_ctrl_x'] = action[0,0]*100
+                test_record['init_ctrl_y'] = action[0,1]*100
                 first_action_recorded = True
 
             # 如果过了前 1000 步（1秒），系统稳定了，就把误差存起来算 MAE
             if step >= 1000:
-                real_error=obs[:3]*50
+                real_error=obs[0,-ORIG_OBS_DIM : -ORIG_OBS_DIM + 3]*50
                 steady_errors.append(real_error)  # 记录稳定阶段的误差，用于后续计算 MAE 和 RMSE
         
         all_tests_data.append(test_record)
@@ -154,21 +161,21 @@ def test_and_evaluate(model_path, add_noise, title):
 # ==========================================
 def main():
     # 填入你的模型路径
-    clean_model_path = "hr_paper_final_model_smooth.zip"      
-    noisy_model_path = "hr_paper_noisy_model_smooth.zip"      
+    clean_model_path = "hr_paper_final_model_filter.zip"      
+    noisy_model_path = "hr_paper_noisy_model_filter.zip"      
 
     results = []
 
     # 场景 A: 干净模型 测 干净环境
-    mae1, rmse1 = test_and_evaluate(clean_model_path, add_noise=False, title="Scenario A (Clean Model, No NoiseSmooth Model, Penalty=0.1)")
+    mae1, rmse1 = test_and_evaluate(clean_model_path, add_noise=False, title="Scenario A (Clean Model, No Noise filter)")
     results.append(["Testing without noise", mae1, rmse1])
 
     # 场景 B: 干净模型 测 噪声环境 (脆弱性测试)
-    mae2, rmse2 = test_and_evaluate(clean_model_path, add_noise=True, title="Scenario B (Clean Model with NoiseSmooth Model, Penalty=0.1)")
+    mae2, rmse2 = test_and_evaluate(clean_model_path, add_noise=True, title="Scenario B (Clean Model with Noise filter)")
     results.append(["Testing with noise (training without noise)", mae2, rmse2])
 
     # 场景 C: 噪声模型 测 噪声环境 (鲁棒性展示)
-    mae3, rmse3 = test_and_evaluate(noisy_model_path, add_noise=True, title="Scenario C (Robust Model with NoiseSmooth Model, Penalty=0.1)")
+    mae3, rmse3 = test_and_evaluate(noisy_model_path, add_noise=True, title="Scenario C (Robust Model with Noise filter)")
     results.append(["Testing with noise (training with noise)", mae3, rmse3])
 
     # --- 打印和保存最终的对比表格 ---
@@ -180,8 +187,8 @@ def main():
     print(df.to_string(index=False))
     print("="*60)
     
-    df.to_csv("table_2_results.csv", index=False)
-    print("✅ 数据已保存至 table_2_results.csv")
+    df.to_csv("table_3_results.csv", index=False)
+    print("✅ 数据已保存至 table_3_results.csv")
 
 if __name__ == "__main__":
     main()
