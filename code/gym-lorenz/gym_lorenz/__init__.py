@@ -9,7 +9,15 @@ register(
     # entry_point="gym_lorenz.envs.lorenz_env_try:HRSyncEnv",
     # 包路径:类名
     # entry_point='gym_lorenz.envs:lorenzEnv_transient',
-    max_episode_steps = 2000,
+    max_episode_steps = 5000,
     reward_threshold  = 1e50
+    # kwargs={'alpha': 10.0, 'beta': 28.0}  # 可选参数
+)
+
+register(
+    id="lorenz_pmsm-v0",
+    entry_point="gym_lorenz.envs:PMSM_Sync_Env",
+    max_episode_steps=2000,
+    reward_threshold=1e50
     # kwargs={'alpha': 10.0, 'beta': 28.0}  # 可选参数
 )

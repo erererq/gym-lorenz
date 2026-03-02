@@ -72,6 +72,8 @@ class AttentionFeaturesExtractor(BaseFeaturesExtractor):
         # 2. 定义一个自注意力层
         self.attention_layer = nn.MultiheadAttention(
             embed_dim=self.token_dim, num_heads=4, batch_first=True)
+        self.layer_norm = nn.LayerNorm(self.token_dim)
+
         # 3. 后处理层：将注意力融合后的序列展平，映射到最终的 features_dim
         self.post_attention_fc=nn.Sequential(
             nn.Linear(self.hidden_dim, self.features_dim),
@@ -83,16 +85,20 @@ class AttentionFeaturesExtractor(BaseFeaturesExtractor):
         """
         # 1. 基础特征提取
         x = torch.relu(self.fc1(observations))  # [batch_size, hidden_dim]
-        # 第二步：重塑为序列 (Reshape)
+        # 2：重塑为序列 (Reshape)
         # 将 [batch_size, 128] 变成 [batch_size, 8, 16]
         # 这样就有 8 个不同的元素可以互相计算注意力了！
         x_seq=x.view(-1,self.seq_len,self.token_dim)  # [batch_size, seq_len, token_dim]
         # 3. 自注意力层
         # 这时，8个特征块之间会产生动态的权重分配，理论上可以捕捉到输入特征之间更复杂的关系
         attn_output, _ = self.attention_layer(x_seq, x_seq, x_seq)  # Self-Attention
-        # 第四步：将序列重新展平回 [batch_size, 128]
-        x_flattened = attn_output.reshape(-1, self.hidden_dim)  # [batch_size, hidden_dim]
-        # 第五步：输出最终特征
+        # 4. 残差连接 (Residual)
+        x_seq = x_seq + attn_output
+        # 5. 层归一化 (LayerNorm) - 极大提升 RL 训练的稳定性
+        x_seq = self.layer_norm(x_seq)
+        # 6：将序列重新展平回 [batch_size, 128]
+        x_flattened = x_seq.reshape(-1, self.hidden_dim)  # [batch_size, hidden_dim]
+        # 7：输出最终特征
         features = self.post_attention_fc(x_flattened)  # [batch_size, features_dim]
         return features
 

@@ -83,12 +83,14 @@ class HRSyncEnv(gym.Env):
         # 拿到网络给出的狂躁 action，做平滑处理！
         # ==========================================
         if self.add_filter:
-            action = (1 - self.action_alpha) * self.filtered_action + self.action_alpha * action
+            self.filtered_action = (1 - self.action_alpha) * self.filtered_action + self.action_alpha * action
+        else:
+            self.filtered_action = action  # 不启用滤波器，直接使用原始动作
         # 映射动作
         # --- 关键修改：手动将 [-1, 1] 映射到 [-100, 100] ---
         # 假设网络输出的是 raw_action
-        a1 = np.clip(action[0], -1, 1) * 100.0
-        a2 = np.clip(action[1], -1, 1) * 100.0
+        a1 = np.clip(self.filtered_action[0], -1, 1) * 100.0
+        a2 = np.clip(self.filtered_action[1], -1, 1) * 100.0
 
         # --- RK4 参数准备 ---
         dt = self.dt
