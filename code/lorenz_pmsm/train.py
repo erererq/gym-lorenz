@@ -154,7 +154,7 @@ def train_pure_pmsm_batch():
     # 纯净版 MLP 架构
     policy_kwargs = dict(
         activation_fn=torch.nn.Tanh, # 或者用你发现的 ReLU 也可以
-        net_arch=dict(pi=[64, 64], vf=[64, 64])
+        net_arch=dict(pi=[128, 128], vf=[128, 128])
     )
 
     for num, den in alpha_fractions:
@@ -170,16 +170,31 @@ def train_pure_pmsm_batch():
         env = VecNormalize(env, norm_obs=True, norm_reward=False, clip_obs=10.0)
         
         # 3. 实例化模型 (纯 MLP + 0.001 学习率)
-        model = A2C("MlpPolicy", env, learning_rate=0.001, n_steps=16, 
+        model = A2C("MlpPolicy",
+                    env, 
+                    learning_rate=linear_schedule(0.0005),
+                    n_steps=16, 
+                    max_grad_norm=0.5,                 # 【终极保险丝】：强行砍掉由于分数阶引发的爆炸梯度！
                     policy_kwargs=policy_kwargs, verbose=1, device='cpu')
         
         # 4. 训练
-        model.learn(total_timesteps=500_000)
+        model.learn(total_timesteps=1000_000)
         
         # 5. 【极其重要】：保存模型的同时，务必保存 VecNormalize 的统计数据！
         model.save(model_name)
         env.save(vecnorm_name)
-
+from typing import Callable
+def linear_schedule(initial_value:float)->Callable[[float], float]:
+    """
+    线性学习率调度器工厂函数。
+    输入初始学习率，返回一个函数，该函数接受当前进度（0.0 到 1.0）并输出调整后的学习率。
+    """
+    def schedule(progress_remaining:float)->float:
+        # progress_remaining 从 1.0 降到 0.0
+        # 我们用它乘以初始学习率，实现线性递减
+        # 为了防止最后期学习率变成绝对的 0 导致网络“脑死”，我们加一个极其微小的保底值 (比如 1e-5)
+        return max(progress_remaining * initial_value, 1e-5)
+    return schedule
 if __name__ == "__main__":
     # 使用文献主推的 A2C 算法进行训练
     # train_pmsm_model(A2C, total_timesteps=500000, add_noise=False,alpha=0.1)

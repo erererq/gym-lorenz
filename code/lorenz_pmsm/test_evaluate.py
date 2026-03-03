@@ -1,10 +1,11 @@
 import gymnasium 
 import numpy as np
 import matplotlib.pyplot as plt
+import pandas as pd
 from stable_baselines3 import A2C
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.monitor import Monitor
-
+from env_utils import make_env
 
 import sys
 from pathlib import Path
@@ -56,6 +57,114 @@ def calculate_advanced_metrics(arr_e, arr_a1, arr_a2, dt=0.01, error_band=0.05):
     # 注意：这里的 arr_a1 和 arr_a2 必须是乘过放大系数(如 50 或 20)后的真实物理力量，而不是神经网络输出的 [-1, 1] 范围内的原始动作
     energy_cost = np.sum(np.square(arr_a1) + np.square(arr_a2)) * dt
     return settling_time, energy_cost
+
+def test_and_export_excel(steps=2000,dt=0.001,add_noise=False):
+    print("=== 开始测试模型并导出 Excel ===")
+    
+    # 物理时间轴：0 到 2.0 秒，共 2000 个点
+    time_axis = np.linspace(0,steps * dt,steps)
+
+    # 创建三个空的数据框，分别用来装 e1, e2, e3 的数据
+    df_e1=pd.DataFrame({'Time/s': time_axis})
+    df_e2=pd.DataFrame({'Time/s': time_axis})
+    df_e3=pd.DataFrame({'Time/s': time_axis})
+
+    alpha_fractions = [(1,2),(1,3),(1,4),(1,6),(1,7),(1,8),(1,9),(1,10)]
+
+    # 【控制变量】：为了让不同 alpha 的曲线具有可比性，必须设置一模一样的初始系统误差！
+    fixed_init_state1 = np.array([10.0, -10.0, 15.0], dtype=np.float32) 
+    fixed_init_state2 = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+
+    for num, den in alpha_fractions:
+        alpha_val = num / den
+        col_name = f"alpha=1/{den}"
+        str= "noisy" if add_noise else "clean"
+        model_name = f"pmsm_a2c_alpha_{alpha_val:.2f}_{str}_model"
+        vecnorm_name = f"pmsm_a2c_alpha_{alpha_val:.2f}_{str}_vecnorm.pkl"
+        
+        try:
+            print(f"\n正在测试 {col_name}...")
+            # 1. 加载基础环境
+            env = DummyVecEnv([lambda: Monitor(make_env(alpha=alpha_val, add_noise=add_noise))])
+            
+            # 2. 【极其重要】：加载训练时的归一化器，并锁死均值和方差！
+            env = VecNormalize.load(vecnorm_name, env)
+            env.training = False      # 绝对不能再更新统计数据了
+            env.norm_reward = False   # 测试时不需要管奖励了
+            
+            # 3. 加载模型
+            model = A2C.load(model_name, env=env,device='cpu')
+            
+            # 4. 重置环境，并强行注入固定的初始状态
+            obs = env.reset()
+            base_env = env.envs[0].unwrapped
+            base_env.state1 = fixed_init_state1.copy()
+            base_env.state2 = fixed_init_state2.copy()
+
+            # 因为你改了底层物理状态，需要手动再拿一次正确的归一化 obs
+            raw_obs = np.concatenate((
+                base_env.state1 - base_env.state2, 
+                base_env._get_derivatives(base_env.state1, [0,0]) - base_env._get_derivatives(base_env.state2, [0,0])
+            )).astype(np.float32)
+            # 这是最关键的一步！给一维的 raw_obs 套上一层外壳，变成二维的 (1, 6)
+            raw_obs = np.expand_dims(raw_obs, axis=0)
+            obs = env.normalize_obs(raw_obs)
+
+            # 准备记录这 2000 步的物理误差
+            traj_e1, traj_e2, traj_e3 = [], [], []
+            
+            # 5. 开始跑物理仿真
+            for step in range(steps):
+                # 【极其致命的开关】：deterministic=True 确保它不瞎探索，拿出真本事！
+                action, _ = model.predict(obs, deterministic=True)
+                obs, reward, dones, info = env.step(action)
+                
+                # 记录当下的纯物理绝对误差 (state1 - state2)
+                current_e1 = base_env.state1[0] - base_env.state2[0]
+                current_e2 = base_env.state1[1] - base_env.state2[1]
+                current_e3 = base_env.state1[2] - base_env.state2[2]
+                
+                traj_e1.append(current_e1)
+                traj_e2.append(current_e2)
+                traj_e3.append(current_e3)
+                
+            # 6. 把这条完美的轨迹塞进 Excel 的对应列里
+            df_e1[col_name] = traj_e1
+            df_e2[col_name] = traj_e2
+            df_e3[col_name] = traj_e3
+            
+            # 【顺手算一下 Table 里的指标（后 1000 步的稳态误差）】
+            steady_e1 = np.array(traj_e1[1000:])
+            steady_e2 = np.array(traj_e2[1000:])
+            steady_e3 = np.array(traj_e3[1000:])
+
+            mae_e1 = np.mean(np.abs(steady_e1))
+            mae_e2 = np.mean(np.abs(steady_e2))
+            mae_e3 = np.mean(np.abs(steady_e3))
+
+            rmse_e1 = np.sqrt(np.mean(steady_e1**2))
+            rmse_e2 = np.sqrt(np.mean(steady_e2**2))
+            rmse_e3 = np.sqrt(np.mean(steady_e3**2))
+            # 打印出来，你可以直接把这些数字抄进你的论文/实验报告的表格里
+            print(f"  📊 【稳态指标汇报 (Alpha = {alpha_val:.2f})】")
+            print(f"  -> MAE  : e1 = {mae_e1:.6f} | e2 = {mae_e2:.6f} | e3 = {mae_e3:.6f}")
+            print(f"  -> RMSE : e1 = {rmse_e1:.6f} | e2 = {rmse_e2:.6f} | e3 = {rmse_e3:.6f}")
+            
+        except Exception as e:
+            print(f"❌ 加载或测试 {col_name} 时报错: {e}")
+            # df_e1[col_name] = np.nan
+            # df_e2[col_name] = np.nan
+            # df_e3[col_name] = np.nan
+
+    # 7. 导出为终极 Excel 文件
+    excel_filename = 'PMSM_Origin_Data.xlsx'
+    with pd.ExcelWriter(excel_filename) as writer:
+        df_e1.to_excel(writer, sheet_name='e1_Error', index=False)
+        df_e2.to_excel(writer, sheet_name='e2_Error', index=False)
+        df_e3.to_excel(writer, sheet_name='e3_Error', index=False)
+        
+    print(f"\n✅ 全部搞定！快去把 {excel_filename} 拖进 Origin 里画图吧！")
+
 def test_evaluate_and_plot(model_path, vecnorm_path, num_tests=10, steps=2000, dt=0.001,alpha=0.5):
     # 1. 挂载环境与归一化包装器
     env = DummyVecEnv([
@@ -251,11 +360,12 @@ def plot_3d_surface(e,z_label='$x_1$',dt=0.001, display_seconds=2.0):
 
 if __name__ == "__main__":
     # 调用此函数即可一键完成测试、出报告并弹出图表
-    test_evaluate_and_plot(
-        model_path="pmsm_attention_clean_model",     # 你的模型名称
-        vecnorm_path="pmsm_attention_clean_vecnorm.pkl", # 你的归一化文件
-        num_tests=10, 
-        steps=2000,
-        alpha=0.5
-    )
+    # test_evaluate_and_plot(
+    #     model_path="pmsm_attention_clean_model",     # 你的模型名称
+    #     vecnorm_path="pmsm_attention_clean_vecnorm.pkl", # 你的归一化文件
+    #     num_tests=10, 
+    #     steps=2000,
+    #     alpha=0.5
+    # )
+    test_and_export_excel()
     
